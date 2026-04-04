@@ -1,4 +1,11 @@
 param(
-    $JsonPath
+    $JsonPath,
+    $ImplitLayer=$true
 )
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Khronos\Vulkan\ExplicitLayers" -Name $JsonPath -Value 0
+
+$reg_path = "HKLM:\SOFTWARE\Khronos\Vulkan\ExplicitLayers"
+if ($ImplitLayer) {
+    $reg_path = "HKLM:\SOFTWARE\Khronos\Vulkan\ImplitLayers"
+}
+Set-ItemProperty -Path $reg_path -Name $JsonPath -Value 0
+
