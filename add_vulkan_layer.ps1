@@ -4,7 +4,7 @@ param(
 )
 
 $reg_path = "HKLM:\SOFTWARE\Khronos\Vulkan\ExplicitLayers"
-if ($ImplitLayer) {
+if ($ImplicitLayer) {
     $reg_path = "HKLM:\SOFTWARE\Khronos\Vulkan\ImplicitLayers"
 }
 Set-ItemProperty -Path $reg_path -Name $JsonPath -Value 0
