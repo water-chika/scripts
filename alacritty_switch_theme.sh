@@ -8,6 +8,7 @@ alacritty msg config 'colors.primary.background="#ffffff"'
 unset COLORTERM
 export TERM=xtermm
 unset LS_COLORS
+unalias ls
 elif test $1 == 'eink'; then
 alacritty msg config 'colors.primary.foreground="#000000"'
 alacritty msg config 'colors.primary.background="#ffffff"'
