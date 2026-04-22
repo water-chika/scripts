@@ -37,6 +37,8 @@ if test $TERM == 'alacritty'; then
 		alacritty_switch_theme eink
 	elif test "$output_make" == 'Samsung Electric Company'; then
 		alacritty_switch_theme oled
+	elif test "$output_make" == 'BOE'; then
+		alacritty_switch_theme oled
 	else
 		alacritty_switch_theme eink
 	fi
