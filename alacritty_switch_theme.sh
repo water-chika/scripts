@@ -28,7 +28,7 @@ function alacritty_get_focused_output_name()
 	swaymsg -t get_outputs | jq -r '.. | select(.focused?) | .make + " " + .model'
 }
 
-if test $TERM == 'alacritty'; then
+if test $TERM == 'alacritty' && test "$SSH_TTY" == ''; then
 	export output_name=$(alacritty_get_focused_output_name)
 	export output_make=$(get_focused_output_make)
 	if test "$output_name" == 'DSC Paperlike H D'; then
