@@ -6,6 +6,7 @@ function default_theme()
 	export LS_COLORS
 	alias ls='ls --color=auto'
 	alias grep='grep --color=auto'
+	alias ip='ip --color=auto'
 	PS1='[\e[0;33;40m\u\e[0;37;40m@\h \W]\$ '
 }
 
@@ -17,6 +18,7 @@ if test $1 == 'gray'; then
 	unset COLORTERM
 	export TERM=xtermm
 	alias ls='ls --color=never'
+	alias ip='ip --color=never'
 	PS1='[\u@\h \W]\$ '
 elif test $1 == 'eink'; then
 	alacritty msg config 'colors.primary.foreground="#000000"'
@@ -25,7 +27,8 @@ elif test $1 == 'eink'; then
 	export LS_COLORS
 	alias ls='ls --color=auto'
 	alias grep='grep --color=auto'
-	PS1='[\u@\h \W]\$ '
+	alias ip='ip --color=auto'
+	PS1='[\e[0;33;49m\u\e[0m@\e[0;35;49m\h \e[0;34;49m\W\e[0m]\$ \e[0m'
 elif test $1 == 'oled'; then
 	alacritty msg config 'colors.primary.foreground="#a0a0a0"'
 	alacritty msg config 'colors.primary.background="#000000"'
@@ -33,7 +36,7 @@ elif test $1 == 'oled'; then
 	export LS_COLORS
 	alias ls='ls --color=auto'
 	alias grep='grep --color=auto'
-	PS1='[\u@\h \W]\$ '
+	alias ip='ip --color=auto'
 	PS1='[\e[0;33;49m\u\e[0m@\e[0;35;49m\h \e[0;34;49m\W\e[0m]\$ \e[0m'
 fi
 }
