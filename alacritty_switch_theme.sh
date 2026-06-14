@@ -7,7 +7,7 @@ function default_theme()
 	alias ls='ls --color=auto'
 	alias grep='grep --color=auto'
 	alias ip='ip --color=auto'
-	PS1='[\e[0;33;40m\u\e[0;37;40m@\h \W]\$ '
+	PS1='[\e[0;33;49m\u\e[0m@\e[0;35;49m\h \e[0;34;49m\W\e[0m]\$ \e[0m'
 }
 
 function alacritty_switch_theme()
