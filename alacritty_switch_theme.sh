@@ -61,6 +61,7 @@ if test "$TERM_THEME" == '' && test "$TERM" == 'alacritty' && test "$SSH_TTY" ==
 	export output_name=$(alacritty_get_focused_output_name)
 	export output_make=$(get_focused_output_make)
 	if test "$output_name" == 'DSC Paperlike H D'; then
+		alacritty msg config 'font.size=20'
 		export TERM_THEME='gray'
 	elif test "$output_name" == 'Invalid Vendor Codename - RTK DS-DP'; then
 		export TERM_THEME='eink'
