@@ -79,7 +79,7 @@ elif test "$TERM_THEME" == "eink"; then
 	alacritty_switch_theme eink
 elif test "$TERM_THEME" == "oled"; then
 	alacritty_switch_theme oled
-elif test "$TERM_THEME" == "default"; then
+else
 	default_theme
 fi
 
