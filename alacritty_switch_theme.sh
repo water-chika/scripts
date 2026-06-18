@@ -7,7 +7,7 @@ function default_theme()
 	alias ls='ls --color=auto'
 	alias grep='grep --color=auto'
 	alias ip='ip --color=auto'
-	PS1='[\e[0;33;49m\u\e[0m@\e[0;35;49m\h \e[0;34;49m\W\e[0m]\$ \e[0m'
+	PS1='[\[\e[0;33;49m\]\u\[\e[m\]@\[\e[0;35;49m\]\h \[\e[0;34;49m\]\W\[\e[m\]]\$ \[\e[m\]'
 }
 
 function alacritty_switch_theme()
@@ -32,7 +32,7 @@ elif test $1 == 'eink'; then
 	alias ls='ls --color=auto'
 	alias grep='grep --color=auto'
 	alias ip='ip --color=auto'
-	PS1='[\e[0;33;49m\u\e[0m@\e[0;35;49m\h \e[0;34;49m\W\e[0m]\$ \e[0m'
+	PS1='[\[\e[0;33;49m\]\u\[\e[m\]@\[\e[0;35;49m\]\h \[\e[0;34;49m\]\W\[\e[m\]]\$ \[\e[m\]'
 elif test $1 == 'oled'; then
 	if test "$TERM" == 'alacritty' && test "$SSH_TTY" == ''; then
 		alacritty msg config 'colors.primary.foreground="#a0a0a0"'
@@ -43,7 +43,7 @@ elif test $1 == 'oled'; then
 	alias ls='ls --color=auto'
 	alias grep='grep --color=auto'
 	alias ip='ip --color=auto'
-	PS1='[\e[0;33;49m\u\e[0m@\e[0;35;49m\h \e[0;34;49m\W\e[0m]\$ \e[0m'
+	PS1='[\[\e[0;33;49m\]\u\[\e[m\]@\[\e[0;35;49m\]\h \[\e[0;34;49m\]\W\[\e[m\]]\$ \[\e[m\]'
 fi
 }
 
