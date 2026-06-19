@@ -20,6 +20,7 @@ if test $1 == 'gray'; then
 	unset COLORTERM
 	export TERM=xtermm
 	alias ls='ls --color=never'
+	unset LS_COLORS
 	alias ip='ip --color=never'
 	PS1='[\u@\h \W]\$ '
 elif test $1 == 'eink'; then
