@@ -27,15 +27,15 @@ fi
 
 case "$TERM_THEME" in
 	"gray")
-		alacritty -o 'colors.primary.foreground="#000000"' -o 'colors.primary.background="#ffffff"'
+		exec alacritty -o 'colors.primary.foreground="#000000"' -o 'colors.primary.background="#ffffff"'
 		;;
 	"eink")
-		alacritty -o 'colors.primary.foreground="#000000"' -o 'colors.primary.background="#ffffff"'
+		exec alacritty -o 'colors.primary.foreground="#000000"' -o 'colors.primary.background="#ffffff"'
 		;;
 	"oled")
-		alacritty -o 'colors.primary.foreground="#a0a0a0"' -o 'colors.primary.background="#000000"'
+		exec alacritty -o 'colors.primary.foreground="#a0a0a0"' -o 'colors.primary.background="#000000"'
 		;;
 	*)
-		alacritty -o 'colors.primary.foreground="#a0a0a0"' -o 'colors.primary.background="#000000"'
+		exec alacritty -o 'colors.primary.foreground="#a0a0a0"' -o 'colors.primary.background="#000000"'
 		;;
 esac
