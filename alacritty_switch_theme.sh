@@ -18,7 +18,7 @@ if test $1 == 'gray'; then
 		alacritty msg config 'colors.primary.background="#ffffff"'
 	fi
 	unset COLORTERM
-	export TERM=xtermm
+	export TERM=alacritty-mono
 	alias ls='ls --color=never'
 	unset LS_COLORS
 	alias ip='ip --color=never'
