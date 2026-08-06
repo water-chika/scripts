@@ -1,0 +1,3 @@
+[submodule "parallel_extract_zip"]
+	path = parallel_extract_zip
+	url = https://github.com/water-chika/parallel_extract_zip
