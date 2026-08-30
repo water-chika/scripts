@@ -71,9 +71,10 @@ def find_seat(ipc, wanted):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--threshold", type=float, default=1500.0,
-                    help="speed in layout px/sec above which the cursor grows "
-                         "(default: %(default)s)")
+    ap.add_argument("--threshold", type=float, default=3000.0,
+                    help="speed in layout px/sec above which the cursor grows. "
+                         "Ordinary pointing peaks well under this; it is meant "
+                         "to fire only on a deliberate flick (default: %(default)s)")
     ap.add_argument("--scale", type=float, default=2.5,
                     help="size multiplier while moving fast (default: %(default)s)")
     ap.add_argument("--base-size", type=int, default=24,
