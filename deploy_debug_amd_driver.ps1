@@ -57,23 +57,52 @@ $remote = "${RemoteUser}@${RemoteHost}"
 # Everything goes over ssh as an -EncodedCommand: the remote side is PowerShell
 # but the command travels through a POSIX-ish shell, and nested quoting of
 # paths and $true is exactly what used to corrupt these invocations.
+# ssh and scp must be started with their standard handles redirected. Calling
+# them directly (& ssh ...) works from a console, but hangs forever when this
+# script is itself running under sshd: the client inherits the session's handles
+# and never sees them close. Passing -n alone does not avoid it.
+function Invoke-Native {
+    param([string]$FilePath, [string[]]$Arguments)
+
+    $quoted = $Arguments | ForEach-Object {
+        if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+    }
+    $out_file = [IO.Path]::GetTempFileName()
+    $err_file = [IO.Path]::GetTempFileName()
+    try {
+        $process = Start-Process -FilePath $FilePath -ArgumentList $quoted -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $out_file -RedirectStandardError $err_file
+        return @{
+            ExitCode = $process.ExitCode
+            Output   = @(Get-Content -LiteralPath $out_file -ErrorAction SilentlyContinue)
+            Error    = @(Get-Content -LiteralPath $err_file -ErrorAction SilentlyContinue)
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $out_file, $err_file -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-RemotePowerShell {
     param([string]$Script, [switch]$AllowFailure)
 
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
-    # -n is not optional: without it a nested ssh reads the caller's stdin and
-    # blocks forever when this script is itself driven over ssh or from a job.
-    $output = & ssh -n -o BatchMode=yes $remote "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}" 2>&1
-    $code = $LASTEXITCODE
-    if ($code -ne 0 -and -not $AllowFailure) {
-        $output | ForEach-Object { Write-Output $_ }
-        throw "Remote command failed on ${RemoteHost} (exit ${code})"
+    $result = Invoke-Native -FilePath 'ssh' -Arguments @(
+        '-n', '-o', 'BatchMode=yes', $remote,
+        "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}")
+
+    if ($result.ExitCode -ne 0 -and -not $AllowFailure) {
+        $result.Output | ForEach-Object { Write-Output $_ }
+        $result.Error | ForEach-Object { Write-Warning $_ }
+        throw "Remote command failed on ${RemoteHost} (exit $($result.ExitCode))"
     }
-    return @{ Output = $output; ExitCode = $code }
+    return $result
 }
 
 # Report the processes that have a file mapped or open, so a sharing violation
-# names the culprit instead of just failing.
+# names the culprit instead of just failing. The loader caches a module's path
+# at load time, so a process that held a file we already renamed still reports
+# the original path here; that is close enough to tell the user what to restart.
 function Get-RemoteFileHolders {
     param([string]$RemotePath)
 
@@ -146,10 +175,12 @@ Get-ChildItem -LiteralPath '${RemoteDirectory}' -Filter '${Name}.inuse-*' -Error
     $result = Invoke-RemotePowerShell -Script $script -AllowFailure
     $count = (($result.Output | Where-Object { "$_".Trim() -ne '' }) -join '').Trim()
     if ($count -match '^[1-9]') {
-        Write-Output "Cleaned up ${count} parked copy/copies of ${Name}"
+        Write-Host "Cleaned up ${count} parked copy/copies of ${Name}"
     }
 }
 
+# Progress goes to the host stream on purpose: anything this function writes to
+# the output stream would be concatenated with the remote path it returns.
 function Copy-ToRemote {
     param([string]$LocalPath, [string]$RemoteDirectory)
 
@@ -163,29 +194,33 @@ function Copy-ToRemote {
         if ($null -ne $existing -and $existing.Length -eq $item.Length) {
             $local_hash = (Get-FileHash -LiteralPath $LocalPath -Algorithm MD5).Hash
             if ($local_hash -eq $existing.Hash) {
-                Write-Output "Skip ${name}: ${RemoteHost} already has this exact file (${size_mb} MB)"
+                Write-Host "Skip ${name}: ${RemoteHost} already has this exact file (${size_mb} MB)"
+                Remove-RemoteAsideFiles -RemoteDirectory $RemoteDirectory -Name $name
                 return $remote_path
             }
         }
     }
 
-    Write-Output "Copy ${name} (${size_mb} MB) to ${RemoteHost}:${remote_path}"
-    & scp -q -o BatchMode=yes $item.FullName "${remote}:${remote_path}"
-    if ($LASTEXITCODE -ne 0) {
+    Write-Host "Copy ${name} (${size_mb} MB) to ${RemoteHost}:${remote_path}"
+    $copy = Invoke-Native -FilePath 'scp' -Arguments @('-q', '-o', 'BatchMode=yes', $item.FullName, "${remote}:${remote_path}")
+    if ($copy.ExitCode -ne 0) {
         # A still-mapped image cannot be overwritten. Park it under a new name
         # and write the new one at the original path; processes holding the old
         # file keep running against it until they exit.
         $windows_path = $remote_path -replace '/', '\'
-        $holders = Get-RemoteFileHolders -RemotePath $windows_path
+        # @() around the call: PowerShell unrolls a one-element array on return,
+        # and a bare string has no .Count under Set-StrictMode.
+        $holders = @(Get-RemoteFileHolders -RemotePath $windows_path)
         $who = if ($holders.Count -gt 0) { $holders -join ', ' } else { 'another process' }
         Write-Warning "${remote_path} is in use by ${who}; renaming it aside and retrying"
 
         $aside = Move-RemoteFileAside -RemotePath $windows_path
-        & scp -q -o BatchMode=yes $item.FullName "${remote}:${remote_path}"
-        if ($LASTEXITCODE -ne 0) {
-            throw "Copy of ${name} to ${remote_path} still failed (scp exit ${LASTEXITCODE}) after parking the old file as ${aside}"
+        $copy = Invoke-Native -FilePath 'scp' -Arguments @('-q', '-o', 'BatchMode=yes', $item.FullName, "${remote}:${remote_path}")
+        if ($copy.ExitCode -ne 0) {
+            $copy.Error | ForEach-Object { Write-Warning $_ }
+            throw "Copy of ${name} to ${remote_path} still failed (scp exit $($copy.ExitCode)) after parking the old file as ${aside}"
         }
-        Write-Output "Previous ${name} parked as ${aside}; it is deleted on the next deploy once ${who} exits"
+        Write-Host "Previous ${name} parked as ${aside}; it is deleted on the next deploy once ${who} exits"
     }
 
     Remove-RemoteAsideFiles -RemoteDirectory $RemoteDirectory -Name $name
