@@ -1,0 +1,11 @@
+{
+    "root": "C:/builds",
+    "relative_paths": [
+        "xgl_stg/icd/RelWithDebInfo",
+        "tools/bin"
+    ],
+    "envs": {
+        "AMD_DEBUG_DIR": "C:/Debug",
+        "VK_LOADER_DEBUG": "all"
+    }
+}

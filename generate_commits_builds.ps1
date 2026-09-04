@@ -18,15 +18,23 @@ function build {
 	git reset --hard $commit
 	$outdir = "build/commits/$commit"
 	$outfile = "$outdir/amdvlk64.dll"
-	if (-not (Get-Item $outfile)) {
+	$built = "build/icd/Release/amdvlk64.dll"
+	# Test-Path, not Get-Item: Get-Item throws on a missing path, so it cannot
+	# be used as an existence test.
+	if (-not (Test-Path -LiteralPath $outfile)) {
 		git submodule update --recursive .
 
-		Remove-Item build/icd/Release/amdvlk64.dll
+		if (Test-Path -LiteralPath $built) {
+			Remove-Item -LiteralPath $built
+		}
 		cmake --build build --target xgl --config Release --parallel
-		
-		if (Get-Item build/icd/Release/amdvlk64.dll) {
-			New-Item -ItemType Directory $outdir
-			Move-Item build/icd/Release/amdvlk64.dll $outfile
+
+		if (Test-Path -LiteralPath $built) {
+			New-Item -ItemType Directory -Force $outdir | Out-Null
+			Move-Item -LiteralPath $built -Destination $outfile
+		}
+		else {
+			Write-Warning "Build produced no ${built} for ${commit}"
 		}
 	}
 }

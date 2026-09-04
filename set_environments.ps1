@@ -1,31 +1,53 @@
 param(
-    $Root
+    $Root,
+    $ConfigPath = "$PSScriptRoot/config.json"
 )
 
-$config = Get-Content $PSScriptRoot/config.json | ConvertFrom-Json
+# Prepends the configured directories to PATH for the current session and applies
+# the configured environment variables. Dot-source it so the changes survive:
+#     . .\set_environments.ps1
 
-if ($null -eq $Root) {
-    $Root = $config.root
+if (-not (Test-Path -LiteralPath $ConfigPath)) {
+    throw "Config not found: ${ConfigPath}. See config.json.example for the expected shape."
 }
 
-$prev_paths = $env:PATH -split ';'
+$config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+
+if ([string]::IsNullOrEmpty($Root)) {
+    $Root = $config.root
+}
+if ([string]::IsNullOrEmpty($Root)) {
+    throw "No root given and none set in ${ConfigPath}"
+}
+
+# An ordered set: configured paths first, then whatever PATH already had,
+# duplicates dropped but original order preserved. Windows treats / and \ alike
+# and is case insensitive, so compare on a normalised key but keep the original
+# spelling as the value.
 $path_table = [ordered]@{}
-
-$relative_paths = $config.relative_paths;
-
-$relative_paths | Foreach-Object {
-    $path = "$Root/$_"
-    if ($null -eq $path_table[$path]) {
-        $path_table[$path] = $True
+function Add-Path {
+    param([string]$Path)
+    if ([string]::IsNullOrEmpty($Path)) {
+        return
+    }
+    $key = ($Path -replace '/', '\').TrimEnd('\').ToLowerInvariant()
+    if (-not $path_table.Contains($key)) {
+        $path_table[$key] = $Path
     }
 }
 
-foreach ($path in $prev_paths) {
-    $path_table[$path] = $True
+foreach ($relative in $config.relative_paths) {
+    Add-Path -Path "${Root}/${relative}"
 }
+foreach ($path in ($env:PATH -split ';')) {
+    Add-Path -Path $path
+}
+$env:PATH = ($path_table.Values) -join ';'
 
-$env:PATH = $path_table.Keys | Join-String -Separator ';'
-
-foreach ($key in $config.envs.Keys) {
-    $env:$key = $config.envs[$key]
+# ConvertFrom-Json yields a PSCustomObject, which has no .Keys, and $env:$key is
+# not valid syntax - the name has to go through the env: provider.
+if ($null -ne $config.envs) {
+    foreach ($property in $config.envs.PSObject.Properties) {
+        Set-Item -LiteralPath "env:$($property.Name)" -Value $property.Value
+    }
 }

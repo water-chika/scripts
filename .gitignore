@@ -1,0 +1,9 @@
+# Per-host configuration: paths and environment differ per machine.
+config.json
+
+# Build and capture output never belongs in this repo.
+build/
+*.dll
+*.pdb
+*.exe
+__pycache__/
