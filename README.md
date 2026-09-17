@@ -71,6 +71,9 @@ Things worth knowing:
 | `sway_cursor_magnify.py` | Grow the cursor while the pointer moves fast, so it is easy to find on a big display. Needs a sway build whose `GET_SEATS` reply carries the cursor position. |
 | `tablet_as_screen.sh` | Add a headless output and serve it over VNC to a tablet through an ssh reverse tunnel. |
 | `screen_shot.sh` | Select a region with `slurp`, capture with `grim`, copy to the clipboard. |
+| `rfb_view.sh` | View a remote desktop with librfb's `rfb_window_demo`: find the host's `rfb_server` port over ssh, tunnel it if it is on loopback, place the window on a workspace. |
+| `vm_view.sh` | View a libvirt domain's console with `virt-viewer`, discovering the protocol and port from libvirt each run. Never touches the domain's power state. |
+| `banana_view.sh` | The water-banana machine: `rfb_view.sh water-banana`, falling back to the SPICE console of the `win11` domain. |
 | `alacritty_switch_theme.sh` | Shell prompt, `LS_COLORS` and Alacritty colours per theme. |
 | `alacritty-mono` | A terminfo source for Alacritty without colour. Compile with `tic`. |
 | `add_path.sh` | `add_path` shell function that prepends to `PATH` without duplicating. |
