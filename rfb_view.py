@@ -126,6 +126,61 @@ def find_gpu_node() -> Optional[str]:
     return None
 
 
+def load_port_map(path: Path) -> dict:
+    """host -> local tunnel port, persisted so the SAME host reuses the
+    SAME local port across separate invocations (deterministic, not
+    random) while DIFFERENT hosts never collapse onto one shared port -
+    that collapse is the bug this whole file exists to fix."""
+    try:
+        import json
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_port_map(path: Path, mapping: dict) -> None:
+    import json
+    try:
+        path.write_text(json.dumps(mapping), encoding="utf-8")
+    except OSError:
+        pass  # best-effort persistence; a lost map just means a fresh port next run
+
+
+def resolve_local_port(host: str, remote_port: str, port_map: dict, *,
+                        port_listening, port_owner_cmdline, start: int = 15901) -> Tuple[int, bool]:
+    """Decide which local port forwards host's remote_port, and whether an
+    existing tunnel on it can be reused. port_map is host -> local_port,
+    mutated in place. port_listening(port)->bool and
+    port_owner_cmdline(port)->str are injected so this is testable with no
+    real ssh/ss/netstat (see test_scripts_port.py).
+
+    Reuse requires BOTH: the port recorded for THIS host is listening, AND
+    the process on it is an ssh tunnel whose argv names this exact host
+    and this exact remote port - never assumed from the port number alone,
+    which is exactly what let water-coffee's viewer silently show
+    water-banana's desktop.
+    """
+    used_ports = set(port_map.values())
+    candidate = port_map.get(host)
+    if candidate is not None and port_listening(candidate):
+        cmdline = port_owner_cmdline(candidate) or ""
+        tokens = cmdline.split()
+        if host in tokens and any(t.endswith(f":{remote_port}") for t in tokens):
+            return candidate, True
+        # Something else - or a stale tunnel to a different host/port - is
+        # sitting on the port we last used for this host. Do not adopt it;
+        # pick a fresh one below instead.
+        used_ports.discard(candidate)
+        candidate = None
+    if candidate is None:
+        port = start
+        while port in used_ports or port_listening(port):
+            port += 1
+        candidate = port
+    port_map[host] = candidate
+    return candidate, False
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ns = parse_args(sys.argv[1:] if argv is None else argv)
     host = ns.host
@@ -164,11 +219,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     target_host = "127.0.0.1"
     target_port = port
     if listen_addr in ("127.0.0.1", "::1", ""):
-        local_port = int(port) + 10000
-        if local_port > 65535:
-            local_port = int(port) + 1
-        if sh.local_port_listening(local_port):
-            print(f"rfb_view: reusing the tunnel already on 127.0.0.1:{local_port}")
+        port_map_path = sh.runtime_dir() / "rfb_view-ports.json"
+        port_map = load_port_map(port_map_path)
+        local_port, reused = resolve_local_port(
+            host, port, port_map,
+            port_listening=sh.local_port_listening,
+            port_owner_cmdline=lambda p: (
+                sh.process_cmdline(sh.local_port_owner_pid(p))
+                if sh.local_port_owner_pid(p) is not None else ""
+            ),
+        )
+        save_port_map(port_map_path, port_map)
+        if reused:
+            print(f"rfb_view: reusing the tunnel already on 127.0.0.1:{local_port} -> {host}:{port}")
         else:
             tunnel_log = sh.runtime_dir() / f"rfb_view-{host}-tunnel.log"
             tunnel_argv = [

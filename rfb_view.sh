@@ -19,6 +19,10 @@
 
 set -u
 
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=rfb_view_portlib.sh
+. "$self_dir/rfb_view_portlib.sh"
+
 self="${0##*/}"
 WORKSPACE="${RFB_VIEW_WORKSPACE:-3}"
 PORT="${RFB_VIEW_PORT:-}"
@@ -113,10 +117,26 @@ target_host=127.0.0.1
 target_port="$PORT"
 case "$listen_addr" in
 	127.0.0.1|::1|"")
-		local_port="${RFB_VIEW_LOCAL_PORT:-$((PORT + 10000))}"
-		[ "$local_port" -gt 65535 ] 2>/dev/null && local_port=$((PORT + 1))
-		if ss -ltn 2>/dev/null | grep -q "127.0.0.1:$local_port "; then
-			printf '%s: reusing the tunnel already on 127.0.0.1:%s\n' "$self" "$local_port"
+		# Per-host local port: the OLD code derived this from the REMOTE port
+		# only ($PORT + 10000), so two different hosts whose rfb_server both
+		# happen to listen on 5901 collapsed onto the SAME local tunnel -
+		# the second host's viewer silently showed the first host's desktop.
+		# The state file below remembers which local port belongs to which
+		# host so the same host reuses its own port and a different host
+		# never can.
+		state="${XDG_RUNTIME_DIR:-/tmp}/rfb_view-ports.state"
+		touch "$state" 2>/dev/null
+
+		# Decide the local port for THIS host, verified by who is really
+		# listening (their real ssh argv), never assumed from the port
+		# number alone - see rfb_view_portlib.sh for the shared logic.
+		read -r local_port reuse <<<"$(rfb_view_resolve_local_port \
+			"$HOST" "$PORT" "$state" 15901 "${RFB_VIEW_LOCAL_PORT:-}")"
+		[ "$local_port" -le 65535 ] 2>/dev/null || die "no free local port found for $HOST" 6
+
+		if [ "$reuse" = 1 ]; then
+			printf '%s: reusing the tunnel already on 127.0.0.1:%s -> %s:%s\n' \
+				"$self" "$local_port" "$HOST" "$PORT"
 		else
 			setsid ssh -N "${ssh_opts[@]}" -o ExitOnForwardFailure=yes \
 				-o ServerAliveInterval=15 \
@@ -131,6 +151,8 @@ case "$listen_addr" in
 				die "could not forward $HOST:$PORT to 127.0.0.1:$local_port" 6
 			printf '%s: tunnel 127.0.0.1:%s -> %s:%s (pid %s)\n' \
 				"$self" "$local_port" "$HOST" "$PORT" "$tunnel"
+			# host -> local_port was already recorded by
+			# rfb_view_resolve_local_port above.
 		fi
 		target_port="$local_port"
 		;;

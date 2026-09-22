@@ -162,3 +162,58 @@ def pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def local_port_owner_pid(port: int) -> Optional[int]:
+    """Which PID owns 127.0.0.1:<port> right now, if anything - used to
+    verify what a listening local port actually IS before treating it as
+    "our tunnel is already up" (never assume that from the port number
+    alone)."""
+    if WINDOWS:
+        rc, out, _ = run(["netstat", "-ano", "-p", "TCP"], timeout=10)
+        if rc != 0:
+            return None
+        needle = f"127.0.0.1:{port} "
+        for line in out.splitlines():
+            if needle in line and "LISTENING" in line:
+                parts = line.split()
+                if parts and parts[-1].isdigit():
+                    return int(parts[-1])
+        return None
+    rc, out, _ = run(["ss", "-ltnp"], timeout=10)
+    if rc != 0:
+        return None
+    needle = f"127.0.0.1:{port} "
+    for line in out.splitlines():
+        if needle not in line:
+            continue
+        m = None
+        for tok in line.split():
+            if tok.startswith("pid=") or ",pid=" in tok:
+                for piece in tok.replace(")", "").split(","):
+                    if piece.startswith("pid="):
+                        m = piece[len("pid="):]
+        if m and m.isdigit():
+            return int(m)
+    return None
+
+
+def process_cmdline(pid: int) -> str:
+    """The full command line a PID was started with - the only reliable
+    way to tell whether a listener on our chosen local port is really an
+    ssh tunnel to the host we expect, rather than something else (or a
+    stale tunnel to a different host) that just happens to occupy the same
+    port number."""
+    if WINDOWS:
+        rc, out, _ = run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"],
+            timeout=10,
+        )
+        return out.strip() if rc == 0 else ""
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().decode(
+            CONSOLE_ENCODING, errors="replace"
+        ).replace("\x00", " ").strip()
+    except OSError:
+        return ""

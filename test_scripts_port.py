@@ -212,5 +212,199 @@ class TestSshAgentSocketPath(unittest.TestCase):
             self.assertEqual(str(ssh_agent.agent_socket_path()), "/tmp/ssh-agent-alice")
 
 
+class TestRfbViewPerHostTunnelPorts(unittest.TestCase):
+    """Regression coverage for the real bug the owner hit: 'rfb_view.sh
+    water-banana' then 'rfb_view.sh water-coffee' both landed on local port
+    15901 because the local port was derived from the REMOTE port
+    (5901 + 10000) only - never from which host it was for. Two different
+    hosts reporting the same remote rfb_server port must never collapse
+    onto the same local tunnel, and a stale/foreign listener on the chosen
+    port must never be silently adopted as "already there". All ssh/ss/
+    netstat/viewer calls are faked - this never touches a real host."""
+
+    def _run_host(self, host, tunnels_up, cmdlines, viewer_argvs, port_map_path):
+        """Drive rfb_view.main([host]) with everything it would shell out
+        to faked: ssh reachability + listener discovery always succeed and
+        report the SAME remote port/addr (5901, on loopback) for every
+        host, exactly like the real water-banana/water-coffee report the
+        real bug's owner saw - the whole point is that the local port must
+        still differ. tunnels_up/cmdlines are dicts this fake mutates so
+        later hosts observe earlier hosts' state, like real listening
+        sockets would."""
+        def fake_run(argv, timeout=None, input_text=None):
+            if argv[:1] == ["ssh"] and "exit" in argv:
+                return 0, "", ""
+            if argv[:1] == ["ssh"] and "tasklist" in argv:
+                return 0, "rfb_server.exe    9999 Console  1   1 K\n", ""
+            if argv[:1] == ["ssh"] and "netstat" in argv:
+                return 0, "  TCP    127.0.0.1:5901   0.0.0.0:0   LISTENING   9999\n", ""
+            return 1, "", ""
+
+        def fake_local_port_listening(port):
+            return tunnels_up.get(port, False)
+
+        def fake_start_background(argv, log_path):
+            viewer_argvs.append(argv)
+            if argv[0] == "ssh":
+                # argv looks like [..., "-L", "<local>:127.0.0.1:<remote>", host]
+                l_idx = argv.index("-L")
+                spec = argv[l_idx + 1]
+                local_port = int(spec.split(":")[0])
+                tunnels_up[local_port] = True
+                cmdlines[local_port] = " ".join(argv)
+            class FakeProc:
+                pid = 424242
+            return FakeProc()
+
+        with patch.object(rfb_view.sh, "run", side_effect=fake_run), \
+             patch.object(rfb_view.sh, "local_port_listening", side_effect=fake_local_port_listening), \
+             patch.object(rfb_view.sh, "local_port_owner_pid",
+                           side_effect=lambda p: p if tunnels_up.get(p) else None), \
+             patch.object(rfb_view.sh, "process_cmdline",
+                           side_effect=lambda pid: cmdlines.get(pid, "")), \
+             patch.object(rfb_view.sh, "start_background", side_effect=fake_start_background), \
+             patch.object(rfb_view.sh, "pid_alive", return_value=True), \
+             patch.object(rfb_view.sh, "place_on_workspace", return_value=None), \
+             patch.object(rfb_view.sh, "which_or_die", return_value="rfb_window_demo"), \
+             patch.object(rfb_view.sh, "runtime_dir", return_value=port_map_path.parent), \
+             patch.object(rfb_view, "find_gpu_node", return_value="/dev/dri/renderD128"), \
+             patch.object(rfb_view.time, "sleep", return_value=None):
+            rfb_view.main([host])
+
+    def test_two_hosts_get_two_different_local_ports(self):
+        # Requirement (1): distinct hosts -> distinct local ports, even
+        # though both "report" the identical remote rfb_server port.
+        tmp = Path(self._tmp_dir())
+        tunnels_up, cmdlines, argvs = {}, {}, []
+        self._run_host("water-banana", tunnels_up, cmdlines, argvs, tmp / "x")
+        self._run_host("water-coffee", tunnels_up, cmdlines, argvs, tmp / "x")
+        local_ports = []
+        for argv in argvs:
+            if argv[0] == "ssh":
+                spec = argv[argv.index("-L") + 1]
+                local_ports.append(int(spec.split(":")[0]))
+        self.assertEqual(len(local_ports), 2, f"expected one tunnel per host, got {argvs}")
+        self.assertNotEqual(local_ports[0], local_ports[1],
+                             "two different hosts must not share one local tunnel port")
+
+    def test_second_host_does_not_reuse_first_hosts_tunnel(self):
+        # Requirement (2): assert on the TUNNEL'S ACTUAL TARGET (its ssh
+        # argv), not on any printed message text - water-coffee's viewer
+        # must never be told to connect through a port whose live tunnel
+        # argv names water-banana as the destination.
+        tmp = Path(self._tmp_dir())
+        tunnels_up, cmdlines, argvs = {}, {}, []
+        self._run_host("water-banana", tunnels_up, cmdlines, argvs, tmp / "x")
+        self._run_host("water-coffee", tunnels_up, cmdlines, argvs, tmp / "x")
+        b_tunnel = next(a for a in argvs if a[0] == "ssh")
+        b_local_port = int(b_tunnel[b_tunnel.index("-L") + 1].split(":")[0])
+        # Find whatever tunnel water-coffee's viewer was actually pointed at.
+        # There may be more than one rfb_window_demo invocation recorded (one
+        # per host called so far) - water-coffee's is the LAST one.
+        coffee_viewer = [a for a in argvs if a[0] == "rfb_window_demo"][-1]
+        coffee_target_port = int(coffee_viewer[2])
+        target_cmdline = cmdlines.get(coffee_target_port, "")
+        self.assertIn("water-coffee", target_cmdline.split())
+        self.assertNotIn("water-banana", target_cmdline.split())
+
+    def test_repeating_the_same_host_reuses_its_own_tunnel(self):
+        # Requirement (3): no pile-up of duplicate tunnels for one host.
+        tmp = Path(self._tmp_dir())
+        tunnels_up, cmdlines, argvs = {}, {}, []
+        self._run_host("water-banana", tunnels_up, cmdlines, argvs, tmp / "x")
+        self._run_host("water-banana", tunnels_up, cmdlines, argvs, tmp / "x")
+        ssh_tunnel_argvs = [a for a in argvs if a[0] == "ssh"]
+        self.assertEqual(len(ssh_tunnel_argvs), 1,
+                          f"a second call for the same host must reuse its tunnel, not open another: {argvs}")
+
+    def _tmp_dir(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="rfb_view_test_")
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return d
+
+
+class TestResolveLocalPort(unittest.TestCase):
+    """Direct, fast unit tests of rfb_view.resolve_local_port() - the piece
+    that actually decides port reuse vs a fresh allocation. Covers
+    requirement (4): a listener already on the chosen port that belongs to
+    something else (or another host) must be detected and skipped, never
+    silently adopted."""
+
+    def test_foreign_listener_on_first_choice_is_skipped_not_adopted(self):
+        port_map = {}
+        # 15901 is occupied by something with no matching argv at all.
+        local_port, reused = rfb_view.resolve_local_port(
+            "water-banana", "5901", port_map,
+            port_listening=lambda p: p == 15901,
+            port_owner_cmdline=lambda p: "unrelated-process --foo",
+        )
+        self.assertFalse(reused)
+        self.assertEqual(local_port, 15902)
+
+    def test_stale_tunnel_to_different_host_on_recorded_port_is_not_adopted(self):
+        port_map = {"water-banana": 15901}
+        local_port, reused = rfb_view.resolve_local_port(
+            "water-banana", "5901", port_map,
+            port_listening=lambda p: p == 15901,
+            port_owner_cmdline=lambda p: "ssh -N -L 15901:127.0.0.1:5901 water-coffee",
+        )
+        self.assertFalse(reused)
+        self.assertNotEqual(local_port, 15901)
+
+    def test_matching_tunnel_is_reused(self):
+        port_map = {"water-banana": 15901}
+        local_port, reused = rfb_view.resolve_local_port(
+            "water-banana", "5901", port_map,
+            port_listening=lambda p: p == 15901,
+            port_owner_cmdline=lambda p: "ssh -N -L 15901:127.0.0.1:5901 water-banana",
+        )
+        self.assertTrue(reused)
+        self.assertEqual(local_port, 15901)
+
+    def test_two_hosts_never_share_a_port_even_freshly_allocated(self):
+        port_map = {}
+        p1, _ = rfb_view.resolve_local_port(
+            "water-banana", "5901", port_map,
+            port_listening=lambda p: False, port_owner_cmdline=lambda p: "",
+        )
+        p2, _ = rfb_view.resolve_local_port(
+            "water-coffee", "5901", port_map,
+            port_listening=lambda p: False, port_owner_cmdline=lambda p: "",
+        )
+        self.assertNotEqual(p1, p2)
+        self.assertEqual(port_map["water-banana"], p1)
+        self.assertEqual(port_map["water-coffee"], p2)
+
+
+class TestPerHostLogAndStatePaths(unittest.TestCase):
+    """Requirement (5): log and port-map state must not collide between
+    hosts - the log filename already carries the host name, and the shared
+    port-map file keys entries by host so two hosts' entries never
+    overwrite each other."""
+
+    def test_log_paths_differ_per_host(self):
+        with patch.object(sh, "runtime_dir", return_value=Path("/tmp")):
+            log_a = sh.runtime_dir() / "rfb_view-water-banana.log"
+            log_b = sh.runtime_dir() / "rfb_view-water-coffee.log"
+        self.assertNotEqual(log_a, log_b)
+
+    def test_port_map_round_trip_keeps_both_hosts_entries(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="rfb_view_state_test_")
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        path = Path(d) / "rfb_view-ports.json"
+        m = {}
+        rfb_view.resolve_local_port("water-banana", "5901", m,
+                                     port_listening=lambda p: False, port_owner_cmdline=lambda p: "")
+        rfb_view.save_port_map(path, m)
+        rfb_view.resolve_local_port("water-coffee", "5901", m,
+                                     port_listening=lambda p: False, port_owner_cmdline=lambda p: "")
+        rfb_view.save_port_map(path, m)
+        reloaded = rfb_view.load_port_map(path)
+        self.assertEqual(set(reloaded), {"water-banana", "water-coffee"})
+        self.assertNotEqual(reloaded["water-banana"], reloaded["water-coffee"])
+
+
 if __name__ == "__main__":
     unittest.main()
