@@ -29,11 +29,17 @@ died on startup.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
+import json
 import os
+import shlex
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import _common as common
 
@@ -97,6 +103,7 @@ def parse_windows_listeners(tasklist_out: str, netstat_out: str) -> List[Tuple[s
         if pid not in pids:
             continue
         addr, _, port = local_addr.rpartition(":")
+        addr = addr.removeprefix("[").removesuffix("]")
         if addr and port:
             results.append((addr, port))
     return results
@@ -113,6 +120,7 @@ def parse_posix_listeners(ss_out: str) -> List[Tuple[str, str]]:
         for tok in parts:
             if tok.count(":") >= 1 and tok.rsplit(":", 1)[-1].isdigit():
                 addr, _, port = tok.rpartition(":")
+                addr = addr.removeprefix("[").removesuffix("]")
                 results.append((addr, port))
                 break
     return results
@@ -141,29 +149,134 @@ def find_gpu_node() -> Optional[str]:
     return None
 
 
+def tunnel_key(host: str, remote_port: str, forward_host: str = "127.0.0.1") -> str:
+    return f"{host}\0{forward_host}\0{remote_port}"
+
+
 def load_port_map(path: Path) -> dict:
-    """host -> local tunnel port, persisted so the SAME host reuses the
-    SAME local port across separate invocations (deterministic, not
-    random) while DIFFERENT hosts never collapse onto one shared port -
-    that collapse is the bug this whole file exists to fix."""
+    """Load a validated tunnel-key -> local port mapping."""
     try:
-        import json
-        return json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        host: port for host, port in value.items()
+        if isinstance(host, str) and type(port) is int and 1 <= port <= 65535
+    }
 
 
-def save_port_map(path: Path, mapping: dict) -> None:
-    import json
+def save_port_map(path: Path, mapping: dict) -> bool:
+    """Atomically replace the map so readers never observe partial JSON."""
+    tmp_path = None
     try:
-        path.write_text(json.dumps(mapping), encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", delete=False,
+        ) as tmp:
+            json.dump(mapping, tmp)
+            tmp_path = Path(tmp.name)
+        os.replace(tmp_path, path)
+        return True
     except OSError:
-        pass  # best-effort persistence; a lost map just means a fresh port next run
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        return False
+
+
+@contextlib.contextmanager
+def port_map_lock(path: Path) -> Iterator[None]:
+    """Serialize allocation through verified tunnel startup across processes."""
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as lock_file:
+        if common.WINDOWS:
+            import msvcrt
+            if lock_file.seek(0, os.SEEK_END) == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            deadline = time.monotonic() + 30
+            while True:
+                lock_file.seek(0)
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(f"timed out waiting for port-map lock {lock_path}")
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def terminate_process(proc) -> None:
+    """Best-effort cleanup for a child that failed its startup checks."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def owner_cmdline_for_port(port: int) -> str:
+    pid = common.local_port_owner_pid(port)
+    return common.process_cmdline(pid) if pid is not None else ""
+
+
+def rfb_runtime_dir() -> Path:
+    base = common.runtime_dir()
+    if not common.WINDOWS and "XDG_RUNTIME_DIR" not in os.environ:
+        base = base / f"rfb-view-{os.getuid()}"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def safe_host_label(host: str) -> str:
+    """Return a filesystem-safe, collision-resistant label for a host."""
+    stem = "".join(c if c.isalnum() or c in "._-" else "_" for c in host).strip("._")
+    digest = hashlib.sha256(host.encode("utf-8")).hexdigest()[:8]
+    return f"{stem[:64] or 'host'}-{digest}"
+
+
+def tunnel_matches(cmdline: str, local_port: int, remote_port: str, host: str,
+                   forward_host: str = "127.0.0.1") -> bool:
+    """Whether an ssh argv owns exactly this loopback forward and destination."""
+    try:
+        tokens = shlex.split(cmdline, posix=not common.WINDOWS)
+    except ValueError:
+        return False
+    if not tokens or Path(tokens[0]).name.lower() not in ("ssh", "ssh.exe"):
+        return False
+    destination = f"[{forward_host}]" if ":" in forward_host else forward_host
+    spec = f"{local_port}:{destination}:{remote_port}"
+    for index, token in enumerate(tokens[:-1]):
+        if token == "-L" and tokens[index + 1] == spec and tokens[-1] == host:
+            return True
+    return False
 
 
 def resolve_local_port(host: str, remote_port: str, port_map: dict, *,
                         port_listening, port_owner_cmdline, start: int = 15901,
-                        preferred: Optional[int] = None) -> Tuple[int, bool]:
+                        preferred: Optional[int] = None,
+                        forward_host: str = "127.0.0.1") -> Tuple[int, bool]:
     """Decide which local port forwards host's remote_port, and whether an
     existing tunnel on it can be reused. port_map is host -> local_port,
     mutated in place. port_listening(port)->bool and
@@ -176,12 +289,29 @@ def resolve_local_port(host: str, remote_port: str, port_map: dict, *,
     which is exactly what let water-coffee's viewer silently show
     water-banana's desktop.
     """
-    used_ports = set(port_map.values())
-    candidate = preferred if preferred is not None else port_map.get(host)
+    if not 1 <= start <= 65535:
+        raise RuntimeError(f"local TCP port start must be between 1 and 65535, got {start}")
+    if preferred is not None and not 1 <= preferred <= 65535:
+        raise RuntimeError(f"preferred local TCP port must be between 1 and 65535, got {preferred}")
+
+    key = tunnel_key(host, remote_port, forward_host)
+    used_ports = {p for p in port_map.values() if type(p) is int and 1 <= p <= 65535}
+    candidate = preferred if preferred is not None else port_map.get(key, port_map.get(host))
+    if not isinstance(candidate, int) or not 1 <= candidate <= 65535:
+        candidate = None
+    elif preferred is not None and not port_listening(candidate):
+        # An explicit override owns a free port even if another host left a
+        # stale reservation for it. Remove that stale entry so the persisted
+        # map continues to express one host per port.
+        for mapped_host, mapped_port in list(port_map.items()):
+            if mapped_host not in (host, key) and mapped_port == candidate:
+                del port_map[mapped_host]
+        used_ports.discard(candidate)
     if candidate is not None and port_listening(candidate):
         cmdline = port_owner_cmdline(candidate) or ""
-        tokens = cmdline.split()
-        if host in tokens and any(t.endswith(f":{remote_port}") for t in tokens):
+        if tunnel_matches(cmdline, candidate, remote_port, host, forward_host):
+            port_map.pop(host, None)
+            port_map[key] = candidate
             return candidate, True
         # Something else - or a stale tunnel to a different host/port - is
         # sitting on the port we last used for this host. Do not adopt it;
@@ -190,12 +320,13 @@ def resolve_local_port(host: str, remote_port: str, port_map: dict, *,
         candidate = None
     if candidate is None:
         port = preferred if preferred is not None else start
-        while port in used_ports or port_listening(port):
+        while port <= 65535 and (port in used_ports or port_listening(port)):
             port += 1
         if port > 65535:
             raise RuntimeError(f"no free local TCP port at or above {start}")
         candidate = port
-    port_map[host] = candidate
+    port_map.pop(host, None)  # migrate the pre-port-key format on first use
+    port_map[key] = candidate
     return candidate, False
 
 
@@ -238,44 +369,55 @@ def main(argv: Optional[List[str]] = None) -> int:
     target_host = "127.0.0.1"
     target_port = port
     if listen_addr in ("127.0.0.1", "::1", ""):
-        port_map_path = common.runtime_dir() / "rfb_view-ports.json"
-        port_map = load_port_map(port_map_path)
-        local_port, reused = resolve_local_port(
-            host, port, port_map,
-            port_listening=common.local_port_listening,
-            preferred=_env_int("RFB_VIEW_LOCAL_PORT"),
-            port_owner_cmdline=lambda p: (
-                common.process_cmdline(common.local_port_owner_pid(p))
-                if common.local_port_owner_pid(p) is not None else ""
-            ),
-        )
-        save_port_map(port_map_path, port_map)
-        if reused:
-            print(f"rfb_view: reusing the tunnel already on 127.0.0.1:{local_port} -> {host}:{port}")
-        else:
-            tunnel_log = common.runtime_dir() / f"rfb_view-{host}-tunnel.log"
-            tunnel_argv = [
-                "ssh", "-N", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-                "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
-                "-L", f"{local_port}:127.0.0.1:{port}", host,
-            ]
-            proc = common.start_background(tunnel_argv, tunnel_log)
-            up = False
-            for _ in range(20):
-                time.sleep(0.5)
-                if common.local_port_listening(local_port):
-                    up = True
-                    break
-            if not up:
-                common.die(f"could not forward {host}:{port} to 127.0.0.1:{local_port}", 6)
-            owner_pid = common.local_port_owner_pid(local_port)
-            owner_cmdline = common.process_cmdline(owner_pid) if owner_pid is not None else ""
-            owner_tokens = owner_cmdline.split()
-            if host not in owner_tokens or not any(t.endswith(f":{port}") for t in owner_tokens):
-                common.die(
-                    f"local port {local_port} is listening but is not the requested "
-                    f"SSH tunnel to {host}:{port}", 6)
-            print(f"rfb_view: tunnel 127.0.0.1:{local_port} -> {host}:{port} (pid {proc.pid})")
+        forward_host = "::1" if listen_addr == "::1" else "127.0.0.1"
+        port_map_path = rfb_runtime_dir() / "rfb_view-ports.json"
+        with port_map_lock(port_map_path):
+            port_map = load_port_map(port_map_path)
+            try:
+                local_port, reused = resolve_local_port(
+                    host, port, port_map,
+                    port_listening=common.local_port_listening,
+                    preferred=_env_int("RFB_VIEW_LOCAL_PORT"),
+                    port_owner_cmdline=owner_cmdline_for_port,
+                    forward_host=forward_host,
+                )
+            except RuntimeError as exc:
+                common.die(str(exc), 6)
+            if reused:
+                print(f"rfb_view: reusing the tunnel already on 127.0.0.1:{local_port} -> {host}:{port}")
+            else:
+                tunnel_log = rfb_runtime_dir() / f"rfb_view-{safe_host_label(host)}-tunnel.log"
+                tunnel_argv = [
+                    "ssh", "-N", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                    "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
+                    "-L", f"{local_port}:{'[' + forward_host + ']' if ':' in forward_host else forward_host}:{port}", host,
+                ]
+                proc = common.start_background(tunnel_argv, tunnel_log)
+                up = False
+                for _ in range(20):
+                    time.sleep(0.5)
+                    if proc.poll() is not None:
+                        break
+                    if common.local_port_listening(local_port):
+                        up = True
+                        break
+                if not up:
+                    terminate_process(proc)
+                    common.die(f"could not forward {host}:{port} to 127.0.0.1:{local_port}", 6)
+                owner_pid = common.local_port_owner_pid(local_port)
+                owner_cmdline = common.process_cmdline(owner_pid) if owner_pid is not None else ""
+                if not tunnel_matches(owner_cmdline, local_port, port, host, forward_host):
+                    terminate_process(proc)
+                    common.die(
+                        f"local port {local_port} is listening but is not the requested "
+                        f"SSH tunnel to {host}:{port}", 6)
+                print(f"rfb_view: tunnel 127.0.0.1:{local_port} -> {host}:{port} (pid {proc.pid})")
+            if not save_port_map(port_map_path, port_map):
+                print(
+                    f"rfb_view: warning - could not save tunnel state to {port_map_path}; "
+                    "a later invocation may open another tunnel",
+                    file=sys.stderr,
+                )
         target_port = str(local_port)
     else:
         target_host = host if listen_addr in ("0.0.0.0", "::") else listen_addr
@@ -286,7 +428,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if ns.view_only:
         viewer_argv.append("--view-only")
 
-    log = common.runtime_dir() / f"rfb_view-{host}.log"
+    log = rfb_runtime_dir() / f"rfb_view-{safe_host_label(host)}.log"
     proc = common.start_background(viewer_argv, log)
     print("rfb_view: " + " ".join(viewer_argv))
 
@@ -296,7 +438,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if sway_available:
         for _ in range(40):
             time.sleep(0.5)
-            if not common.pid_alive(proc.pid):
+            if proc.poll() is not None:
                 common.die(
                     f"viewer exited during startup; see {log} (it has crashed on a "
                     "bad DRM node before - try --gpu /dev/dri/renderD128)",
@@ -309,7 +451,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             common.die(f"viewer is running but no Sway window appeared within 20s; see {log}", 7)
     else:
         time.sleep(1)
-        if not common.pid_alive(proc.pid):
+        if proc.poll() is not None:
             common.die(f"viewer exited during startup; see {log}", 7)
 
     if placed:

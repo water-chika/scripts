@@ -123,6 +123,11 @@ class TestRfbViewListenerParsing(unittest.TestCase):
         netstat = "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       999\n"
         self.assertEqual(rfb_view.parse_windows_listeners(tasklist, netstat), [])
 
+    def test_windows_bracketed_ipv6_is_normalized(self):
+        tasklist = "rfb_server.exe               4242 Console  1     12,345 K\n"
+        netstat = "  TCP    [::1]:5901             [::]:0                 LISTENING       4242\n"
+        self.assertEqual(rfb_view.parse_windows_listeners(tasklist, netstat), [("::1", "5901")])
+
     def test_windows_no_process_at_all(self):
         self.assertEqual(rfb_view.parse_windows_listeners("", "anything"), [])
 
@@ -186,10 +191,10 @@ class TestFocusedWorkspace(unittest.TestCase):
         with patch.object(sh.shutil, "which", return_value=None):
             self.assertEqual(sh.focused_workspace(), (False, None))
 
-    def test_installed_but_unreachable_sway_is_not_called_absent(self):
+    def test_installed_but_unreachable_sway_is_unavailable(self):
         with patch.object(sh.shutil, "which", return_value="/usr/bin/swaymsg"), \
              patch.object(sh, "run", return_value=(1, "", "socket error")):
-            self.assertEqual(sh.focused_workspace(), (True, None))
+            self.assertEqual(sh.focused_workspace(), (False, None))
 
 
 class TestPlaceOnWorkspaceSkipsWithoutSway(unittest.TestCase):
@@ -197,6 +202,18 @@ class TestPlaceOnWorkspaceSkipsWithoutSway(unittest.TestCase):
         # This is the exact behaviour a Windows run relies on: no sway on
         # PATH -> no attempt to shell out to it, no crash, just None.
         with patch.object(sh.shutil, "which", return_value=None):
+            self.assertIsNone(sh.place_on_workspace(1234, "3"))
+
+    def test_returns_none_when_move_fails(self):
+        with patch.object(sh.shutil, "which", return_value="/usr/bin/swaymsg"), \
+             patch.object(sh, "run", return_value=(1, "", "move failed")) as run:
+            self.assertIsNone(sh.place_on_workspace(1234, "3"))
+            self.assertEqual(run.call_count, 1)
+
+    def test_returns_none_when_window_remains_on_wrong_workspace(self):
+        tree = '{"type":"root","nodes":[{"type":"workspace","name":"1","nodes":[{"pid":1234}]}]}'
+        with patch.object(sh.shutil, "which", return_value="/usr/bin/swaymsg"), \
+             patch.object(sh, "run", side_effect=[(0, "", ""), (0, tree, "")]):
             self.assertIsNone(sh.place_on_workspace(1234, "3"))
 
 
@@ -255,7 +272,7 @@ class TestRfbViewPerHostTunnelPorts(unittest.TestCase):
     netstat/viewer calls are faked - this never touches a real host."""
 
     def _run_host(self, host, tunnels_up, cmdlines, viewer_argvs, port_map_path,
-                  sway=(False, None), placement=None):
+                  sway=(False, None), placement=None, viewer_poll=None):
         """Drive rfb_view.main([host]) with everything it would shell out
         to faked: ssh reachability + listener discovery always succeed and
         report the SAME remote port/addr (5901, on loopback) for every
@@ -287,6 +304,10 @@ class TestRfbViewPerHostTunnelPorts(unittest.TestCase):
                 cmdlines[local_port] = " ".join(argv)
             class FakeProc:
                 pid = 424242
+
+                @staticmethod
+                def poll():
+                    return None if argv[0] == "ssh" else viewer_poll
             return FakeProc()
 
         with patch.object(rfb_view.common, "run", side_effect=fake_run), \
@@ -316,6 +337,12 @@ class TestRfbViewPerHostTunnelPorts(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             self._run_host("water-banana", {}, {}, [], tmp / "x",
                            sway=(True, "1"), placement=None)
+        self.assertEqual(ctx.exception.code, 7)
+
+    def test_exited_viewer_is_detected_without_sway(self):
+        tmp = Path(self._tmp_dir())
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_host("water-banana", {}, {}, [], tmp / "x", viewer_poll=1)
         self.assertEqual(ctx.exception.code, 7)
 
     def test_two_hosts_get_two_different_local_ports(self):
@@ -369,6 +396,63 @@ class TestRfbViewPerHostTunnelPorts(unittest.TestCase):
         d = tempfile.mkdtemp(prefix="rfb_view_test_")
         self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
         return d
+
+
+class TestRfbViewStateHelpers(unittest.TestCase):
+    def _tmp_dir(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="rfb_view_state_test_")
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return Path(d)
+
+    def test_non_mapping_json_is_ignored(self):
+        path = self._tmp_dir() / "ports.json"
+        path.write_text("null", encoding="utf-8")
+        self.assertEqual(rfb_view.load_port_map(path), {})
+
+    def test_invalid_mapping_entries_are_filtered(self):
+        path = self._tmp_dir() / "ports.json"
+        path.write_text('{"good": 15901, "high": 70000, "text": "15902"}', encoding="utf-8")
+        self.assertEqual(rfb_view.load_port_map(path), {"good": 15901})
+
+    def test_exact_tunnel_match_rejects_wrong_forward_target(self):
+        cmdline = "ssh -N -L 15901:other-machine:5901 water-banana"
+        self.assertFalse(rfb_view.tunnel_matches(cmdline, 15901, "5901", "water-banana"))
+
+    def test_exact_tunnel_match_accepts_requested_forward(self):
+        cmdline = "ssh -N -L 15901:127.0.0.1:5901 water-banana"
+        self.assertTrue(rfb_view.tunnel_matches(cmdline, 15901, "5901", "water-banana"))
+
+    def test_exact_tunnel_match_accepts_ipv6_loopback_forward(self):
+        cmdline = "ssh -N -L 15901:[::1]:5901 water-banana"
+        self.assertTrue(
+            rfb_view.tunnel_matches(
+                cmdline, 15901, "5901", "water-banana", forward_host="::1"
+            )
+        )
+
+    def test_terminate_process_kills_after_wait_timeout(self):
+        class Proc:
+            terminated = False
+            killed = False
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout):
+                raise __import__("subprocess").TimeoutExpired("ssh", timeout)
+
+            def kill(self):
+                self.killed = True
+
+        proc = Proc()
+        rfb_view.terminate_process(proc)
+        self.assertTrue(proc.terminated)
+        self.assertTrue(proc.killed)
+
+    def test_safe_host_label_has_no_windows_reserved_characters(self):
+        label = rfb_view.safe_host_label("user@[2001:db8::1]:2222")
+        self.assertFalse(any(char in label for char in '<>:"/\\|?*'))
 
 
 class TestResolveLocalPort(unittest.TestCase):
@@ -428,6 +512,16 @@ class TestResolveLocalPort(unittest.TestCase):
         self.assertFalse(reused)
         self.assertNotEqual(local_port, 16001)
 
+    def test_free_preferred_port_replaces_other_hosts_stale_mapping(self):
+        port_map = {"water-coffee": 16001}
+        local_port, reused = rfb_view.resolve_local_port(
+            "water-banana", "5901", port_map, preferred=16001,
+            port_listening=lambda p: False, port_owner_cmdline=lambda p: "",
+        )
+        self.assertEqual(local_port, 16001)
+        self.assertFalse(reused)
+        self.assertEqual(port_map, {rfb_view.tunnel_key("water-banana", "5901"): 16001})
+
     def test_two_hosts_never_share_a_port_even_freshly_allocated(self):
         port_map = {}
         p1, _ = rfb_view.resolve_local_port(
@@ -439,8 +533,44 @@ class TestResolveLocalPort(unittest.TestCase):
             port_listening=lambda p: False, port_owner_cmdline=lambda p: "",
         )
         self.assertNotEqual(p1, p2)
-        self.assertEqual(port_map["water-banana"], p1)
-        self.assertEqual(port_map["water-coffee"], p2)
+        self.assertEqual(port_map[rfb_view.tunnel_key("water-banana", "5901")], p1)
+        self.assertEqual(port_map[rfb_view.tunnel_key("water-coffee", "5901")], p2)
+
+    def test_one_host_can_retain_distinct_remote_port_tunnels(self):
+        port_map = {}
+        p1, _ = rfb_view.resolve_local_port(
+            "water-banana", "5901", port_map,
+            port_listening=lambda p: False, port_owner_cmdline=lambda p: "",
+        )
+        p2, _ = rfb_view.resolve_local_port(
+            "water-banana", "5902", port_map,
+            port_listening=lambda p: False, port_owner_cmdline=lambda p: "",
+        )
+        self.assertNotEqual(p1, p2)
+        self.assertEqual(len(port_map), 2)
+
+    def test_port_range_exhaustion_fails(self):
+        with self.assertRaisesRegex(RuntimeError, "no free local TCP port"):
+            rfb_view.resolve_local_port(
+                "water-banana", "5901", {}, start=65535,
+                port_listening=lambda p: True, port_owner_cmdline=lambda p: "",
+            )
+
+    def test_out_of_range_preferred_port_fails(self):
+        with self.assertRaisesRegex(RuntimeError, "preferred local TCP port"):
+            rfb_view.resolve_local_port(
+                "water-banana", "5901", {}, preferred=65536,
+                port_listening=lambda p: False, port_owner_cmdline=lambda p: "",
+            )
+
+    def test_out_of_range_stale_mapping_is_replaced(self):
+        port_map = {"water-banana": 70000}
+        port, reused = rfb_view.resolve_local_port(
+            "water-banana", "5901", port_map,
+            port_listening=lambda p: False, port_owner_cmdline=lambda p: "",
+        )
+        self.assertEqual(port, 15901)
+        self.assertFalse(reused)
 
 
 class TestPerHostLogAndStatePaths(unittest.TestCase):
@@ -468,8 +598,10 @@ class TestPerHostLogAndStatePaths(unittest.TestCase):
                                      port_listening=lambda p: False, port_owner_cmdline=lambda p: "")
         rfb_view.save_port_map(path, m)
         reloaded = rfb_view.load_port_map(path)
-        self.assertEqual(set(reloaded), {"water-banana", "water-coffee"})
-        self.assertNotEqual(reloaded["water-banana"], reloaded["water-coffee"])
+        banana_key = rfb_view.tunnel_key("water-banana", "5901")
+        coffee_key = rfb_view.tunnel_key("water-coffee", "5901")
+        self.assertEqual(set(reloaded), {banana_key, coffee_key})
+        self.assertNotEqual(reloaded[banana_key], reloaded[coffee_key])
 
 
 if __name__ == "__main__":

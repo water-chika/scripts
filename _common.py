@@ -117,7 +117,7 @@ def focused_workspace() -> Tuple[bool, Optional[str]]:
         return False, None
     rc, out, _ = run(["swaymsg", "-t", "get_workspaces"], timeout=5)
     if rc != 0 or not out:
-        return True, None
+        return False, None
     import json as _json
     try:
         workspaces = _json.loads(out)
@@ -139,7 +139,11 @@ def place_on_workspace(pid: int, workspace: str) -> Optional[str]:
     if not shutil.which("swaymsg"):
         return None
     escaped = workspace.replace("\\", "\\\\").replace('"', '\\"')
-    run(["swaymsg", f'[pid={pid}] move container to workspace "{escaped}"'], timeout=5)
+    move_rc, _, _ = run(
+        ["swaymsg", f'[pid={pid}] move container to workspace "{escaped}"'], timeout=5
+    )
+    if move_rc != 0:
+        return None
     rc, out, _ = run(["swaymsg", "-t", "get_tree"], timeout=5)
     if rc != 0 or not out:
         return None
@@ -155,9 +159,10 @@ def place_on_workspace(pid: int, workspace: str) -> Optional[str]:
         return ws if node.get("pid") == pid else None
 
     try:
-        return walk(_json.loads(out))
+        placed = walk(_json.loads(out))
     except ValueError:
         return None
+    return placed if placed == workspace else None
 
 
 def focus_window(pid: int) -> bool:
