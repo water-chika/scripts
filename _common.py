@@ -107,16 +107,39 @@ def local_port_listening(port: int) -> bool:
     return f"127.0.0.1:{port} " in out
 
 
+def focused_workspace() -> Tuple[bool, Optional[str]]:
+    """Return (sway_available, focused workspace name).
+
+    Availability means swaymsg can query this compositor, not merely that the
+    executable happens to be installed.
+    """
+    if not shutil.which("swaymsg"):
+        return False, None
+    rc, out, _ = run(["swaymsg", "-t", "get_workspaces"], timeout=5)
+    if rc != 0 or not out:
+        return True, None
+    import json as _json
+    try:
+        workspaces = _json.loads(out)
+    except ValueError:
+        return False, None
+    for workspace in workspaces:
+        if workspace.get("focused"):
+            return True, str(workspace.get("name"))
+    return True, None
+
+
 def place_on_workspace(pid: int, workspace: str) -> Optional[str]:
     """sway-only window placement. Returns the workspace name the window
     ended up on, or None if there is no sway to ask (swaymsg not on PATH -
     always true on Windows, so this is naturally a no-op there rather than a
     special-cased platform branch). This is deliberately the ONE piece of
-    rfb_view.sh/vm_view.sh that is NOT part of the portable tunnel/viewer
+    rfb_view.py/vm_view.py that is NOT part of the portable tunnel/viewer
     contract - see rfb_view.py's module docstring for why it is split out."""
     if not shutil.which("swaymsg"):
         return None
-    run(["swaymsg", f"[pid={pid}] move container to workspace {workspace}"], timeout=5)
+    escaped = workspace.replace("\\", "\\\\").replace('"', '\\"')
+    run(["swaymsg", f'[pid={pid}] move container to workspace "{escaped}"'], timeout=5)
     rc, out, _ = run(["swaymsg", "-t", "get_tree"], timeout=5)
     if rc != 0 or not out:
         return None
@@ -135,6 +158,14 @@ def place_on_workspace(pid: int, workspace: str) -> Optional[str]:
         return walk(_json.loads(out))
     except ValueError:
         return None
+
+
+def focus_window(pid: int) -> bool:
+    """Focus a Sway window by PID, making its workspace visible."""
+    if not shutil.which("swaymsg"):
+        return False
+    rc, _, _ = run(["swaymsg", f"[pid={pid}] focus"], timeout=5)
+    return rc == 0
 
 
 def start_background(argv: Sequence[str], log_path: Path):

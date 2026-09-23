@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Extensionless entrypoint for the canonical rfb_view.py implementation."""
+from rfb_view import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

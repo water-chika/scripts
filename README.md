@@ -91,11 +91,11 @@ port to - they are deliberately NOT in `portability.json`'s tracked-tool
 list; see the `_comment` there for the reasoning recorded once rather than
 re-litigated per script.
 
-## Host/viewer glue (portable - `.py` canonical, `.sh` kept for reference)
+## Host/viewer glue (portable Python entrypoints)
 
 | Script | Purpose |
 | --- | --- |
-| `rfb_view.py` (canonical; `rfb_view.sh` kept, unchanged) | View a remote desktop with librfb's `rfb_window_demo`: find the host's `rfb_server` port over ssh, tunnel it if it is on loopback, place the window on a sway workspace. |
+| `rfb_view` / `rfb_view.py` | View a remote desktop with librfb's `rfb_window_demo`: find the host's `rfb_server` port over ssh, tunnel it if it is on loopback, and keep the window on the focused sway workspace unless another is requested. |
 | `vm_view.py` (canonical; `vm_view.sh` kept, unchanged) | View a libvirt domain's console with `virt-viewer` or `rfb_window_demo`, discovering the protocol and port from libvirt each run. Never touches the domain's power state. |
 | `banana_view.py` (canonical; `banana_view.sh` kept, unchanged) | The water-banana machine: `rfb_view.py water-banana`, falling back to the SPICE console of the `win11` domain. |
 | `screen_shot.py` (canonical; `screen_shot.sh` kept, unchanged) | Select a region and put it on the clipboard: `slurp`+`grim`+`wl-copy` on Linux, the built-in Snip & Sketch region tool (`ms-screenclip:`) on Windows. |
@@ -106,9 +106,9 @@ Why `.py` and not a `.sh`/`.ps1` pair: these already only ever call out to
 cross-platform facilities (ssh, virsh/virt-viewer, netstat/ss) - the
 per-platform part is small enough to be an `if` branch in one file, the same
 call `probe.py` made in `copilot-automation` for
-`probe_windows_host.sh`/`probe_libvirt_vm.sh`/`probe_wip_holder.sh`. The
-`.sh` originals are kept next to their `.py` replacement, unchanged, as a
-reference - not deleted.
+`probe_windows_host.sh`/`probe_libvirt_vm.sh`/`probe_wip_holder.sh`. Most
+`.sh` originals remain only where they still provide a supported compatibility
+path; the RFB viewer now has one canonical Python implementation.
 
 **What a Windows colleague loses, honestly:** window placement on a sway
 workspace is sway-specific and is skipped outright on Windows (no crash -

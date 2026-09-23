@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _common as sh
 import add_path
+import banana_view
 import rfb_view
 import vm_view
 
@@ -70,7 +71,7 @@ class TestRfbViewArgParsing(unittest.TestCase):
     def test_host_only(self):
         ns = rfb_view.parse_args(["myhost"])
         self.assertEqual(ns.host, "myhost")
-        self.assertEqual(ns.workspace, "3")
+        self.assertIsNone(ns.workspace)
         self.assertIsNone(ns.port)
         self.assertFalse(ns.view_only)
 
@@ -84,6 +85,20 @@ class TestRfbViewArgParsing(unittest.TestCase):
         self.assertEqual(ns.workspace, "2")
         self.assertEqual(ns.port, 5901)
         self.assertEqual(ns.gpu, "/dev/dri/renderD128")
+        self.assertEqual(ns.encodings, "raw")
+        self.assertTrue(ns.view_only)
+
+    def test_environment_defaults_and_cli_precedence(self):
+        env = {
+            "RFB_VIEW_WORKSPACE": "6", "RFB_VIEW_PORT": "5902",
+            "RFB_VIEW_GPU": "/dev/dri/env", "RFB_VIEW_ENCODINGS": "raw",
+            "RFB_VIEW_READONLY": "1",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            ns = rfb_view.parse_args(["-w", "2", "-p", "5903", "myhost"])
+        self.assertEqual(ns.workspace, "2")
+        self.assertEqual(ns.port, 5903)
+        self.assertEqual(ns.gpu, "/dev/dri/env")
         self.assertEqual(ns.encodings, "raw")
         self.assertTrue(ns.view_only)
 
@@ -160,6 +175,23 @@ class TestVmViewArgParsing(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
 
 
+class TestFocusedWorkspace(unittest.TestCase):
+    def test_returns_focused_workspace(self):
+        payload = '[{"name":"1","focused":true},{"name":"3","focused":false}]'
+        with patch.object(sh.shutil, "which", return_value="/usr/bin/swaymsg"), \
+             patch.object(sh, "run", return_value=(0, payload, "")):
+            self.assertEqual(sh.focused_workspace(), (True, "1"))
+
+    def test_reports_sway_unavailable(self):
+        with patch.object(sh.shutil, "which", return_value=None):
+            self.assertEqual(sh.focused_workspace(), (False, None))
+
+    def test_installed_but_unreachable_sway_is_not_called_absent(self):
+        with patch.object(sh.shutil, "which", return_value="/usr/bin/swaymsg"), \
+             patch.object(sh, "run", return_value=(1, "", "socket error")):
+            self.assertEqual(sh.focused_workspace(), (True, None))
+
+
 class TestPlaceOnWorkspaceSkipsWithoutSway(unittest.TestCase):
     def test_returns_none_when_swaymsg_absent(self):
         # This is the exact behaviour a Windows run relies on: no sway on
@@ -213,8 +245,8 @@ class TestSshAgentSocketPath(unittest.TestCase):
 
 
 class TestRfbViewPerHostTunnelPorts(unittest.TestCase):
-    """Regression coverage for the real bug the owner hit: 'rfb_view.sh
-    water-banana' then 'rfb_view.sh water-coffee' both landed on local port
+    """Regression coverage for the real bug the owner hit: 'rfb_view
+    water-banana' then 'rfb_view water-coffee' both landed on local port
     15901 because the local port was derived from the REMOTE port
     (5901 + 10000) only - never from which host it was for. Two different
     hosts reporting the same remote rfb_server port must never collapse
@@ -222,7 +254,8 @@ class TestRfbViewPerHostTunnelPorts(unittest.TestCase):
     port must never be silently adopted as "already there". All ssh/ss/
     netstat/viewer calls are faked - this never touches a real host."""
 
-    def _run_host(self, host, tunnels_up, cmdlines, viewer_argvs, port_map_path):
+    def _run_host(self, host, tunnels_up, cmdlines, viewer_argvs, port_map_path,
+                  sway=(False, None), placement=None):
         """Drive rfb_view.main([host]) with everything it would shell out
         to faked: ssh reachability + listener discovery always succeed and
         report the SAME remote port/addr (5901, on loopback) for every
@@ -256,20 +289,34 @@ class TestRfbViewPerHostTunnelPorts(unittest.TestCase):
                 pid = 424242
             return FakeProc()
 
-        with patch.object(rfb_view.sh, "run", side_effect=fake_run), \
-             patch.object(rfb_view.sh, "local_port_listening", side_effect=fake_local_port_listening), \
-             patch.object(rfb_view.sh, "local_port_owner_pid",
+        with patch.object(rfb_view.common, "run", side_effect=fake_run), \
+             patch.object(rfb_view.common, "local_port_listening", side_effect=fake_local_port_listening), \
+             patch.object(rfb_view.common, "local_port_owner_pid",
                            side_effect=lambda p: p if tunnels_up.get(p) else None), \
-             patch.object(rfb_view.sh, "process_cmdline",
+             patch.object(rfb_view.common, "process_cmdline",
                            side_effect=lambda pid: cmdlines.get(pid, "")), \
-             patch.object(rfb_view.sh, "start_background", side_effect=fake_start_background), \
-             patch.object(rfb_view.sh, "pid_alive", return_value=True), \
-             patch.object(rfb_view.sh, "place_on_workspace", return_value=None), \
-             patch.object(rfb_view.sh, "which_or_die", return_value="rfb_window_demo"), \
-             patch.object(rfb_view.sh, "runtime_dir", return_value=port_map_path.parent), \
+             patch.object(rfb_view.common, "start_background", side_effect=fake_start_background), \
+             patch.object(rfb_view.common, "pid_alive", return_value=True), \
+             patch.object(rfb_view.common, "place_on_workspace", return_value=placement), \
+             patch.object(rfb_view.common, "focus_window", return_value=True), \
+             patch.object(rfb_view.common, "focused_workspace", return_value=sway), \
+             patch.object(rfb_view.common, "which_or_die", return_value="rfb_window_demo"), \
+             patch.object(rfb_view.common, "runtime_dir", return_value=port_map_path.parent), \
              patch.object(rfb_view, "find_gpu_node", return_value="/dev/dri/renderD128"), \
              patch.object(rfb_view.time, "sleep", return_value=None):
             rfb_view.main([host])
+
+    def test_default_places_on_focused_workspace(self):
+        tmp = Path(self._tmp_dir())
+        self._run_host("water-banana", {}, {}, [], tmp / "x",
+                       sway=(True, "1"), placement="1")
+
+    def test_active_sway_without_window_is_startup_failure(self):
+        tmp = Path(self._tmp_dir())
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_host("water-banana", {}, {}, [], tmp / "x",
+                           sway=(True, "1"), placement=None)
+        self.assertEqual(ctx.exception.code, 7)
 
     def test_two_hosts_get_two_different_local_ports(self):
         # Requirement (1): distinct hosts -> distinct local ports, even
@@ -361,6 +408,25 @@ class TestResolveLocalPort(unittest.TestCase):
         )
         self.assertTrue(reused)
         self.assertEqual(local_port, 15901)
+
+    def test_preferred_local_port_is_honored_when_free(self):
+        port_map = {}
+        local_port, reused = rfb_view.resolve_local_port(
+            "water-banana", "5901", port_map, preferred=16001,
+            port_listening=lambda p: False, port_owner_cmdline=lambda p: "",
+        )
+        self.assertFalse(reused)
+        self.assertEqual(local_port, 16001)
+
+    def test_preferred_local_port_with_foreign_owner_falls_back(self):
+        port_map = {}
+        local_port, reused = rfb_view.resolve_local_port(
+            "water-banana", "5901", port_map, preferred=16001,
+            port_listening=lambda p: p == 16001,
+            port_owner_cmdline=lambda p: "unrelated-process",
+        )
+        self.assertFalse(reused)
+        self.assertNotEqual(local_port, 16001)
 
     def test_two_hosts_never_share_a_port_even_freshly_allocated(self):
         port_map = {}
