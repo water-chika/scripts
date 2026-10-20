@@ -148,7 +148,7 @@ class TestRfbViewerResolution(unittest.TestCase):
         self.assertEqual(argv, [
             "rfb_window_demo", "127.0.0.1", "15901", "zrle,raw",
             "--gpu", "/dev/dri/renderD128", "--view-only",
-            "--presentation-mode", "legacy",
+            "--presentation-mode", "release-gated",
         ])
 
     def test_windows_viewer_omits_gpu_but_keeps_view_only(self):

@@ -118,7 +118,7 @@ def viewer_argv(viewer: str, host: str, port: str, encodings: str, *,
     if view_only:
         argv.append("--view-only")
     if use_gpu:
-        argv += ["--presentation-mode", "legacy"]
+        argv += ["--presentation-mode", "release-gated"]
     return argv
 
 
