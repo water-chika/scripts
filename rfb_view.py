@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""rfb_view.py - port of the former shell implementation: view a remote desktop with librfb's own
-viewer, rfb_window_demo.
+"""rfb_view.py - port of the former shell implementation: view a remote desktop with librfb's
+platform-native viewer.
 
 Two concerns, kept deliberately separate (per the port brief): the tunnel and
 port discovery are the portable part - they work the same on Linux and
@@ -13,13 +13,17 @@ this script still finds the port, opens the tunnel and starts the viewer, a
 Windows colleague just also has to place the window by hand, exactly as they
 would with any other viewer app.
 
-Usage matches the former shell implementation:
+Usage matches the former shell implementation, with a portable viewer override:
   rfb_view.py [-w WORKSPACE] [-p PORT] [-g DRM_NODE] [-e ENCODINGS]
-              [--view-only] HOST [WORKSPACE]
+              [--viewer PROGRAM] [--view-only] HOST [WORKSPACE]
 
---gpu/DRM discovery is Linux-only (rfb_window_demo renders through
-DRM/amdgpu); on Windows there is no /dev/dri, so --gpu is simply not
-required there - this is the other genuine platform difference besides sway.
+The viewer resolves in this order: --viewer, RFB_VIEWER, the deprecated
+RFB_WINDOW_DEMO variable, then the platform default (rfb_window_win32 on
+Windows and rfb_window_demo elsewhere).
+
+--gpu/DRM discovery belongs only to the default Linux rfb_window_demo (and
+the deprecated RFB_WINDOW_DEMO override). Generic viewer overrides and the
+Windows-native viewer never receive --gpu.
 
 Exit codes match the former shell implementation: 2 usage, 3 no viewer binary, 4 host
 unreachable, 5 no rfb_server found on the host, 6 tunnel failed, 7 viewer
@@ -59,11 +63,12 @@ def _env_int(name: str) -> Optional[int]:
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(add_help=False, usage="rfb_view.py [-w WORKSPACE] [-p PORT] [-g DRM_NODE] [-e ENCODINGS] [--view-only] HOST [WORKSPACE]")
+    p = argparse.ArgumentParser(add_help=False, usage="rfb_view.py [-w WORKSPACE] [-p PORT] [-g DRM_NODE] [-e ENCODINGS] [--viewer PROGRAM] [--view-only] HOST [WORKSPACE]")
     p.add_argument("-w", "--workspace", default=os.environ.get("RFB_VIEW_WORKSPACE"))
     p.add_argument("-p", "--port", type=int, default=_env_int("RFB_VIEW_PORT"))
     p.add_argument("-g", "--gpu", default=os.environ.get("RFB_VIEW_GPU"))
     p.add_argument("-e", "--encodings", default=os.environ.get("RFB_VIEW_ENCODINGS", "zrle,raw"))
+    p.add_argument("--viewer")
     p.add_argument("--view-only", action="store_true", default=_env_bool("RFB_VIEW_READONLY"))
     p.add_argument("-h", "--help", action="store_true")
     p.add_argument("host", nargs="?")
@@ -78,6 +83,43 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     if ns.workspace_pos:
         ns.workspace = ns.workspace_pos
     return ns
+
+
+def resolve_viewer(cli_viewer: Optional[str] = None) -> Tuple[str, bool]:
+    """Return the selected viewer and whether it uses the DRM --gpu option.
+
+    A generic override may select any viewer and therefore receives only the
+    common arguments. The deprecated variable retains rfb_window_demo's old
+    command-line contract.
+    """
+    if cli_viewer:
+        return cli_viewer, False
+    viewer = os.environ.get("RFB_VIEWER")
+    if viewer:
+        return viewer, False
+    legacy_viewer = os.environ.get("RFB_WINDOW_DEMO")
+    if legacy_viewer:
+        print(
+            "rfb_view: warning - RFB_WINDOW_DEMO is deprecated; use RFB_VIEWER",
+            file=sys.stderr,
+        )
+        return legacy_viewer, not common.WINDOWS
+    if common.WINDOWS:
+        return "rfb_window_win32", False
+    return "rfb_window_demo", True
+
+
+def viewer_argv(viewer: str, host: str, port: str, encodings: str, *,
+                gpu: Optional[str], use_gpu: bool, view_only: bool) -> List[str]:
+    """Build the viewer command line without leaking DRM-only options."""
+    argv = [viewer, host, port, encodings]
+    if gpu and use_gpu:
+        argv += ["--gpu", gpu]
+    if view_only:
+        argv.append("--view-only")
+    if use_gpu:
+        argv += ["--presentation-mode", "legacy"]
+    return argv
 
 
 def parse_windows_listeners(tasklist_out: str, netstat_out: str) -> List[Tuple[str, str]]:
@@ -334,19 +376,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     ns = parse_args(sys.argv[1:] if argv is None else argv)
     host = ns.host
 
-    viewer_name = os.environ.get("RFB_WINDOW_DEMO", "rfb_window_demo")
+    viewer_name, viewer_uses_gpu = resolve_viewer(ns.viewer)
     viewer = common.which_or_die(
         viewer_name,
         "It is built from the librfb project; add its build output directory "
-        "to PATH, e.g. add_path /mnt/build/librfb_build/librfb",
+        "to PATH or select it with --viewer/RFB_VIEWER",
         exit_code=3,
     )
 
+    # An explicit --gpu/RFB_VIEW_GPU remains an override. Otherwise let
+    # rfb_window_demo select the presentation GPU from per-surface
+    # linux-dmabuf feedback; choosing the first renderD* can pick a GPU which
+    # does not own the monitor and breaks fullscreen direct scanout.
     gpu = ns.gpu
-    if not gpu and not common.WINDOWS:
-        gpu = find_gpu_node()
-        if not gpu:
-            common.die("no DRM render node found in /dev/dri; pass --gpu", 3)
 
     rc, _, _ = common.run(common.ssh_argv(host, ["exit"]), timeout=20)
     if rc != 0:
@@ -422,15 +464,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         target_host = host if listen_addr in ("0.0.0.0", "::") else listen_addr
 
-    viewer_argv = [viewer, target_host, target_port, ns.encodings]
-    if gpu:
-        viewer_argv += ["--gpu", gpu]
-    if ns.view_only:
-        viewer_argv.append("--view-only")
+    command = viewer_argv(
+        viewer, target_host, target_port, ns.encodings,
+        gpu=gpu, use_gpu=viewer_uses_gpu, view_only=ns.view_only,
+    )
 
     log = rfb_runtime_dir() / f"rfb_view-{safe_host_label(host)}.log"
-    proc = common.start_background(viewer_argv, log)
-    print("rfb_view: " + " ".join(viewer_argv))
+    proc = common.start_background(command, log)
+    print("rfb_view: " + " ".join(command))
 
     sway_available, focused = common.focused_workspace()
     workspace = ns.workspace or focused or "3"

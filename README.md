@@ -95,7 +95,7 @@ re-litigated per script.
 
 | Script | Purpose |
 | --- | --- |
-| `rfb_view` / `rfb_view.py` | View a remote desktop with librfb's `rfb_window_demo`: find the host's `rfb_server` port over ssh, tunnel it if it is on loopback, and keep the window on the focused sway workspace unless another is requested. |
+| `rfb_view` / `rfb_view.py` | View a remote desktop with librfb's platform-native viewer: find the host's `rfb_server` port over ssh, tunnel it if it is on loopback, and keep the window on the focused sway workspace unless another is requested. |
 | `vm_view.py` (canonical; `vm_view.sh` kept, unchanged) | View a libvirt domain's console with `virt-viewer` or `rfb_window_demo`, discovering the protocol and port from libvirt each run. Never touches the domain's power state. |
 | `banana_view.py` (canonical; `banana_view.sh` kept, unchanged) | The water-banana machine: `rfb_view.py water-banana`, falling back to the SPICE console of the `win11` domain. |
 | `screen_shot.py` (canonical; `screen_shot.sh` kept, unchanged) | Select a region and put it on the clipboard: `slurp`+`grim`+`wl-copy` on Linux, the built-in Snip & Sketch region tool (`ms-screenclip:`) on Windows. |
@@ -122,8 +122,17 @@ calling shell, which no subprocess can do on either platform; both now print
 an eval-able line instead (`--shell posix` or `--shell powershell`) rather
 than silently doing nothing when run directly.
 
-`rfb_view.py`'s `--gpu` auto-discovery (`/dev/dri/renderD*`) is Linux-only,
-since `rfb_window_demo` renders through DRM/amdgpu - not required on Windows.
+`rfb_view.py` selects `rfb_window_demo` on Linux and `rfb_window_win32` on
+Windows. Override that selection with `--viewer PROGRAM` or `RFB_VIEWER`; the
+older `RFB_WINDOW_DEMO` variable remains a deprecated fallback. Resolution is
+`--viewer`, `RFB_VIEWER`, `RFB_WINDOW_DEMO`, then the platform default.
+
+`--gpu` and its automatic `/dev/dri/renderD*` discovery apply only to the
+default Linux `rfb_window_demo` (and the deprecated `RFB_WINDOW_DEMO` path),
+which renders through DRM/amdgpu. Generic `--viewer`/`RFB_VIEWER` overrides and
+the Windows-native viewer receive no `--gpu` argument. `--view-only` is passed
+to every viewer, and viewer selection does not change SSH discovery or
+loopback-tunnel safety.
 
 ## Submodule
 

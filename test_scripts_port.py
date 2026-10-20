@@ -81,11 +81,13 @@ class TestRfbViewArgParsing(unittest.TestCase):
 
     def test_flags(self):
         ns = rfb_view.parse_args(["-w", "2", "-p", "5901", "-g", "/dev/dri/renderD128",
-                                   "-e", "raw", "--view-only", "myhost"])
+                                   "-e", "raw", "--viewer", "/opt/rfb/viewer",
+                                   "--view-only", "myhost"])
         self.assertEqual(ns.workspace, "2")
         self.assertEqual(ns.port, 5901)
         self.assertEqual(ns.gpu, "/dev/dri/renderD128")
         self.assertEqual(ns.encodings, "raw")
+        self.assertEqual(ns.viewer, "/opt/rfb/viewer")
         self.assertTrue(ns.view_only)
 
     def test_environment_defaults_and_cli_precedence(self):
@@ -106,6 +108,66 @@ class TestRfbViewArgParsing(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             rfb_view.parse_args([])
         self.assertEqual(ctx.exception.code, 2)
+
+
+class TestRfbViewerResolution(unittest.TestCase):
+    def test_cli_precedes_both_environment_variables(self):
+        with patch.dict(os.environ, {
+            "RFB_VIEWER": "new-env-viewer",
+            "RFB_WINDOW_DEMO": "legacy-env-viewer",
+        }, clear=False):
+            self.assertEqual(rfb_view.resolve_viewer("cli-viewer"), ("cli-viewer", False))
+
+    def test_rfb_viewer_precedes_deprecated_variable(self):
+        with patch.dict(os.environ, {
+            "RFB_VIEWER": "new-env-viewer",
+            "RFB_WINDOW_DEMO": "legacy-env-viewer",
+        }, clear=False):
+            self.assertEqual(rfb_view.resolve_viewer(), ("new-env-viewer", False))
+
+    def test_deprecated_variable_remains_supported(self):
+        with patch.dict(os.environ, {
+            "RFB_WINDOW_DEMO": "legacy-env-viewer",
+        }, clear=True):
+            self.assertEqual(rfb_view.resolve_viewer(), ("legacy-env-viewer", True))
+
+    def test_platform_defaults(self):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(rfb_view.common, "WINDOWS", False):
+            self.assertEqual(rfb_view.resolve_viewer(), ("rfb_window_demo", True))
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(rfb_view.common, "WINDOWS", True):
+            self.assertEqual(rfb_view.resolve_viewer(), ("rfb_window_win32", False))
+
+    def test_linux_viewer_keeps_gpu_and_view_only(self):
+        with patch.object(rfb_view.common, "WINDOWS", False):
+            argv = rfb_view.viewer_argv(
+                "rfb_window_demo", "127.0.0.1", "15901", "zrle,raw",
+                gpu="/dev/dri/renderD128", use_gpu=True, view_only=True,
+            )
+        self.assertEqual(argv, [
+            "rfb_window_demo", "127.0.0.1", "15901", "zrle,raw",
+            "--gpu", "/dev/dri/renderD128", "--view-only",
+            "--presentation-mode", "legacy",
+        ])
+
+    def test_windows_viewer_omits_gpu_but_keeps_view_only(self):
+        argv = rfb_view.viewer_argv(
+            "rfb_window_win32", "127.0.0.1", "15901", "zrle,raw",
+            gpu=r"C:\ignored", use_gpu=False, view_only=True,
+        )
+        self.assertEqual(argv, [
+            "rfb_window_win32", "127.0.0.1", "15901", "zrle,raw", "--view-only",
+        ])
+
+    def test_custom_linux_viewer_does_not_receive_gpu(self):
+        argv = rfb_view.viewer_argv(
+            "custom-viewer", "127.0.0.1", "15901", "zrle,raw",
+            gpu="/dev/dri/renderD128", use_gpu=False, view_only=False,
+        )
+        self.assertEqual(argv, [
+            "custom-viewer", "127.0.0.1", "15901", "zrle,raw",
+        ])
 
 
 class TestRfbViewListenerParsing(unittest.TestCase):
